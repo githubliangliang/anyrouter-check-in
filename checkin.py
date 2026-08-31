@@ -35,10 +35,11 @@ from utils.browser import (
 )
 from utils.config import AccountConfig, AppConfig, load_accounts_config
 from utils.debug import debug_print, is_debug_enabled
-from utils.notify import notify
+from utils.notify import NotificationKit
 from utils.proxy import get_playwright_proxy, get_proxy_server
 
 load_dotenv()
+notify = NotificationKit()
 
 BALANCE_HASH_FILE = 'balance_hash.txt'
 
@@ -75,16 +76,27 @@ def generate_balance_hash(balances):
 def parse_cookies(cookies_data):
 	"""解析 cookies 数据"""
 	if isinstance(cookies_data, dict):
-		return cookies_data
+		cookies_dict = dict(cookies_data)
+		session_value = cookies_dict.get('session')
+		if isinstance(session_value, str):
+			nested_cookies = _parse_cookie_header(session_value)
+			if 'session' in nested_cookies:
+				cookies_dict['session'] = nested_cookies['session']
+		return cookies_dict
 
 	if isinstance(cookies_data, str):
-		cookies_dict = {}
-		for cookie in cookies_data.split(';'):
-			if '=' in cookie:
-				key, value = cookie.strip().split('=', 1)
-				cookies_dict[key] = value
-		return cookies_dict
+		return _parse_cookie_header(cookies_data)
 	return {}
+
+
+def _parse_cookie_header(cookie_header: str) -> dict:
+	"""将 Cookie 请求头解析为名称和值。"""
+	cookies_dict = {}
+	for cookie in cookie_header.split(';'):
+		if '=' in cookie:
+			key, value = cookie.strip().split('=', 1)
+			cookies_dict[key] = value
+	return cookies_dict
 
 
 async def get_waf_cookies_with_browser(
@@ -317,37 +329,8 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 
 def format_check_in_notification(detail: dict) -> str:
 	"""格式化签到通知消息"""
-	lines = [
-		f'[CHECK-IN] {detail["name"]}',
-		'  ━━━━━━━━━━━━━━━━━━━━',
-		'  签到前',
-		f'     余额: ${detail["before_quota"]:.2f}  |  累计消耗: ${detail["before_used"]:.2f}',
-		'  签到后',
-		f'     余额: ${detail["after_quota"]:.2f}  |  累计消耗: ${detail["after_used"]:.2f}',
-	]
-
-	has_reward = detail['check_in_reward'] != 0
-	has_usage = detail['usage_increase'] != 0
-
-	if has_reward or has_usage:
-		lines.append('  ━━━━━━━━━━━━━━━━━━━━')
-
-		if not has_reward and has_usage:
-			lines.append('  今日已签到（期间有使用）')
-
-		if has_reward:
-			lines.append(f'  签到获得: +${detail["check_in_reward"]:.2f}')
-
-		if has_usage:
-			lines.append(f'  期间消耗: ${detail["usage_increase"]:.2f}')
-
-		if detail['balance_change'] != 0:
-			change_symbol = '+' if detail['balance_change'] > 0 else ''
-			lines.append(f'  余额变化: {change_symbol}${detail["balance_change"]:.2f}')
-	else:
-		lines.extend(['  ━━━━━━━━━━━━━━━━━━━━', '  今日已签到，无变化'])
-
-	return '\n'.join(lines)
+	status = f'签到 +${detail["check_in_reward"]:.2f}' if detail['check_in_reward'] != 0 else '已签到'
+	return f'{detail["name"]} | 余额 ${detail["before_quota"]:.2f} -> ${detail["after_quota"]:.2f} | {status}'
 
 
 async def check_in_account(account: AccountConfig, account_index: int, app_config: AppConfig):
@@ -563,9 +546,11 @@ async def main():
 				status = '[SUCCESS]' if success else '[FAIL]'
 				account_result = f'{status} {account_name}'
 				if user_info_after and user_info_after.get('success'):
-					account_result += f'\n{user_info_after["display"]}'
+					display = ' '.join(str(user_info_after['display']).splitlines())
+					account_result += f' | {display}'
 				elif user_info_after:
-					account_result += f'\n{user_info_after.get("error", "Unknown error")}'
+					error = ' '.join(str(user_info_after.get('error', 'Unknown error')).splitlines())
+					account_result += f' | {error}'
 				notification_content.append(account_result)
 
 		except Exception as e:
@@ -601,22 +586,10 @@ async def main():
 		save_balance_hash(current_balance_hash)
 
 	if need_notify and notification_content:
-		summary = [
-			'[STATS] Check-in result statistics:',
-			f'[SUCCESS] Success: {success_count}/{total_count}',
-			f'[FAIL] Failed: {total_count - success_count}/{total_count}',
-		]
+		summary = f'[SUCCESS] {success_count}/{total_count} | [FAIL] {total_count - success_count}/{total_count}'
+		time_info = f'[TIME] {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
 
-		if success_count == total_count:
-			summary.append('[SUCCESS] All accounts check-in successful!')
-		elif success_count > 0:
-			summary.append('[WARN] Some accounts check-in successful')
-		else:
-			summary.append('[ERROR] All accounts check-in failed')
-
-		time_info = f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
-
-		notify_content = '\n\n'.join([time_info, '\n'.join(notification_content), '\n'.join(summary)])
+		notify_content = '\n'.join([time_info, *notification_content, summary])
 		screenshot_paths = take_pending_screenshots() if is_debug_enabled() else []
 		if screenshot_paths:
 			github_run_id = os.getenv('GITHUB_RUN_ID', '').strip()
@@ -627,7 +600,7 @@ async def main():
 				screenshot_hint += f'. Download artifact `checkin-screenshots-{github_run_id}` from: {run_url}'
 			else:
 				screenshot_hint += ' to `checkin_screenshots/`'
-			notify_content += f'\n\n{screenshot_hint}'
+			notify_content += f'\n{screenshot_hint}'
 
 		print(notify_content)
 		notify.push_message('AnyRouter Check-in Alert', notify_content, msg_type='text')

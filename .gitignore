@@ -1,5 +1,7 @@
 .claude
 .env
+accounts.json
+multisite_accounts.json
 .venv
 __pycache__
 .pytest_cache

@@ -2,7 +2,7 @@
 
 ## 目标
 
-在保留现有 AnyRouter、AgentRouter 和 Tabitoken 独立入口的前提下，新增一个本地多站点签到入口，使用同一份独立 JSON 管理以下 New API 站点账号：
+新增一个本地多站点签到入口，使用同一份独立 JSON 管理以下 New API 站点账号：
 
 - `https://tabitoken.com`
 - `https://gorouter.app`
@@ -38,7 +38,8 @@ multisite_accounts.json
   {
     "site": "gorouter",
     "name": "gorouter-1",
-    "access_token": "填写访问令牌"
+    "access_token": "填写访问令牌",
+    "api_user": "填写 GoRouter 的 New-Api-User"
   },
   {
     "site": "justwoker",
@@ -82,6 +83,8 @@ Authorization: Bearer <access_token>
 Accept: application/json
 ```
 
+GoRouter 账号额外发送 `New-Api-User: <api_user>`；Tabitoken 和 JustWoker 不需要该字段。
+
 `gorouter.app` 的未授权响应为 HTTP 200 的业务失败 JSON，`api.justwoker.icu` 的未授权响应为 HTTP 401 和 `AUTH_UNAUTHORIZED`；脚本统一按 payload 的 `success` 和错误消息分类，不依赖单一 HTTP 状态码。
 
 Turnstile 响应仅在页面上下文中读取，并作为一次性查询参数用于重试签到；Python 进程不打印或持久化该值。
@@ -124,6 +127,5 @@ Turnstile 响应仅在页面上下文中读取，并作为一次性查询参数�
 ## 非目标
 
 - 不修改现有 AnyRouter/AgentRouter 账号格式或签到逻辑。
-- 不删除或改变 `tabitoken_checkin.py` 的现有行为。
 - 不支持无头 CI 自动完成 Turnstile。
 - 不实现验证码识别、第三方打码或 Turnstile 绕过。

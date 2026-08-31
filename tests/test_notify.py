@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -155,6 +156,34 @@ def test_missing_config(monkeypatch):
 
 	with pytest.raises(ValueError, match='PushPlus Token not configured'):
 		kit.send_pushplus('测试', '测试')
+
+
+def test_checkin_initializes_notification_after_loading_dotenv():
+	webhook = 'https://oapi.dingtalk.com/robot/send?access_token=from_dotenv'
+	env = os.environ.copy()
+	env.pop('DINGDING_WEBHOOK', None)
+	script = f"""\
+import os
+import dotenv
+
+def load_test_dotenv():
+\tos.environ['DINGDING_WEBHOOK'] = {webhook!r}
+
+dotenv.load_dotenv = load_test_dotenv
+import checkin
+print(checkin.notify.dingding_webhook)
+"""
+
+	result = subprocess.run(
+		[sys.executable, '-c', script],
+		cwd=project_root,
+		env=env,
+		check=True,
+		capture_output=True,
+		text=True,
+	)
+
+	assert result.stdout.strip() == webhook
 
 
 def test_push_message(notification_kit, monkeypatch):

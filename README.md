@@ -363,9 +363,13 @@ uv sync --dev
 uv run python -m cloakbrowser install
 # 如需使用本地浏览器，可设置 CLOAKBROWSER_BINARY_PATH=/path/to/browser
 
-# 创建 .env 文件并配置（注意：JSON 必须是单行格式）
-# 示例：
-# ANYROUTER_ACCOUNTS=[{"name":"账号1","email":"your@email.com","password":"your_password"}]
+# 创建本地配置文件
+cp .env.example .env
+cp accounts.example.json accounts.json
+
+# 编辑 accounts.json，填写每个账号的 session 与 api_user
+# .env 默认通过下面的配置加载该文件：
+# ANYROUTER_ACCOUNTS_FILE=accounts.json
 # PROVIDERS={"agentrouter":{"domain":"https://agentrouter.org"}}
 # PROXY_SUBSCRIPTION_URL=https://example.com/sub?token=xxx
 # CHECKIN_PROXY_URL=http://127.0.0.1:7890
@@ -373,6 +377,10 @@ uv run python -m cloakbrowser install
 # 运行签到脚本
 uv run checkin.py
 ```
+
+`accounts.json` 已加入 `.gitignore`，不会被 Git 提交。文件中的账号格式与 `ANYROUTER_ACCOUNTS` 完全相同，但可以换行并逐个维护账号。如果同时配置 `ANYROUTER_ACCOUNTS_FILE` 和 `ANYROUTER_ACCOUNTS`，脚本优先读取账号文件；文件不存在或格式错误时会停止运行，不会回退到旧环境变量。
+
+若仍需使用单行环境变量，可删除 `ANYROUTER_ACCOUNTS_FILE`，再在 `.env` 中配置 `ANYROUTER_ACCOUNTS`。
 
 ## 测试
 
@@ -388,6 +396,59 @@ uv run pytest tests/
 # 查看测试覆盖率
 uv run pytest tests/ --cov=. --cov-report=html
 ```
+
+## 多站点访问令牌签到
+
+所有 New API 站点可以共用一个本地签到脚本及账号文件。首次配置：
+
+```bash
+cp multisite_accounts.example.json multisite_accounts.json
+```
+
+编辑 `multisite_accounts.json`，按需保留账号。内置站点（`site` 直接填写即可，无需 `url`）：`tabitoken`、`gorouter`、`justwoker`、`kktoken`。
+
+```json
+[
+  {
+    "site": "kktoken",
+    "name": "我的 KKToken",
+    "access_token": "你的访问令牌"
+  },
+  {
+    "site": "gorouter",
+    "name": "我的 GoRouter",
+    "access_token": "你的访问令牌",
+    "api_user": "你的 New-Api-User"
+  }
+]
+```
+
+新增站点不需要改代码：`site` 填一个自定义标识（用于日志和独立浏览器 profile 目录，不能包含 `/` 或 `\`），再用 `url` 指定站点地址即可。
+
+```json
+[
+  {
+    "site": "newapi",
+    "url": "https://newapi.example.com",
+    "name": "我的新站点",
+    "access_token": "你的访问令牌"
+  }
+]
+```
+
+`url`（等价键名 `domain`）支持带端口和子路径，末尾斜杠会自动去掉。默认接口路径为 `/sign-in`、`/api/user/self`、`/api/user/checkin`；若某站点不同，可按账号覆盖 `profile_path`、`user_path`、`checkin_path`、`api_user_header`。给内置站点填 `url` 可切换到镜像域名，其余配置保持不变。
+
+需要 `New-Api-User` 请求头的站点（内置的 GoRouter，或自定义站点填了 `api_user_header`）必须同时填写 `access_token` 和 `api_user`。`api_user` 可在登录后打开浏览器开发者工具的 Network 面板，查看站点 Fetch/XHR 请求头获取；其他站点不需要该字段。
+
+运行多站点签到：
+
+```bash
+uv run python multisite_checkin.py
+```
+
+脚本会按账号顺序打开有头浏览器，每个站点和账号使用独立的持久化 profile。若出现 Cloudflare Turnstile，请在窗口中手动完成验证。`MULTISITE_ACCOUNTS_FILE` 可指定其它 JSON 文件；真实配置文件已加入 `.gitignore`。
+
+配置 `DINGDING_WEBHOOK` 后，每次多站点签到结束都会发送账号结果汇总。钉钉机器人自定义安全关键字需设置为 `tabitoken`；通知标题固定包含该关键字，消息不会包含访问令牌或 Turnstile 响应。
 
 ## 贡献指南
 

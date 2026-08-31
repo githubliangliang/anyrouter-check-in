@@ -181,16 +181,28 @@ class AccountConfig:
 
 
 def load_accounts_config() -> list[AccountConfig] | None:
-	"""从环境变量加载账号配置"""
-	accounts_str = os.getenv('ANYROUTER_ACCOUNTS')
-	if not accounts_str:
-		print('ERROR: ANYROUTER_ACCOUNTS environment variable not found')
-		return None
+	"""从账号文件或环境变量加载账号配置"""
+	accounts_file = os.getenv('ANYROUTER_ACCOUNTS_FILE', '').strip()
+	if accounts_file:
+		try:
+			with open(accounts_file, 'r', encoding='utf-8') as f:
+				accounts_str = f.read()
+		except OSError as e:
+			print(f'ERROR: Failed to read ANYROUTER_ACCOUNTS_FILE "{accounts_file}": {e}')
+			return None
+		config_source = f'ANYROUTER_ACCOUNTS_FILE "{accounts_file}"'
+	else:
+		inline_accounts = os.getenv('ANYROUTER_ACCOUNTS')
+		if not inline_accounts:
+			print('ERROR: Configure ANYROUTER_ACCOUNTS_FILE or ANYROUTER_ACCOUNTS')
+			return None
+		accounts_str = inline_accounts
+		config_source = 'ANYROUTER_ACCOUNTS'
 
 	try:
 		accounts_data = json.loads(accounts_str)
 	except json.JSONDecodeError as e:
-		print(f'ERROR: ANYROUTER_ACCOUNTS JSON 解析失败: {e}')
+		print(f'ERROR: {config_source} JSON 解析失败: {e}')
 		print('HINT: 常见原因 - 末尾多余逗号、使用了单引号、包含注释、或换行格式问题')
 		return None
 

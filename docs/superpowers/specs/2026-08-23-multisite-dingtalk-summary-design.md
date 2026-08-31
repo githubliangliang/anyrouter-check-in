@@ -78,7 +78,6 @@ justwoker/main: auth_failed
 
 ## 非目标
 
-- 不为 `tabitoken_checkin.py` 增加通知。
 - 不修改现有 `checkin.py` 的通知触发规则。
 - 不新增钉钉签名密钥或机器人配置格式。
 - 不发送访问令牌、Turnstile 响应、浏览器状态或截图。
