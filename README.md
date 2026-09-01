@@ -22,61 +22,52 @@
 - ✅ 多种机器人通知（可选）
 - ✅ 绕过 WAF 限制
 
+## 配置文件
+
+账号配置以仓库里的两个示例文件为准，复制成真实文件后按需删改条目即可（真实文件已在 `.gitignore` 中，不会被提交）：
+
+| 示例文件 | 复制为 | 用途 | 运行命令 |
+| --- | --- | --- | --- |
+| `accounts.example.json` | `accounts.json` | AnyRouter / AgentRouter 等 provider 账号，邮箱密码或 session cookies 登录 | `uv run checkin.py` |
+| `multisite_accounts.example.json` | `multisite_accounts.json` | 任意 New API 站点的访问令牌签到（本地有头浏览器） | `uv run python multisite_checkin.py` |
+
+```bash
+cp .env.example .env
+cp accounts.example.json accounts.json                      # provider 签到
+cp multisite_accounts.example.json multisite_accounts.json  # 多站点访问令牌签到
+```
+
+`.env.example` 里已经写好 `ANYROUTER_ACCOUNTS_FILE=accounts.json`，复制成 `.env` 即生效；多站点脚本默认就读 `multisite_accounts.json`，只有想换文件名时才需要设置 `MULTISITE_ACCOUNTS_FILE`。示例文件里出现的字段就是脚本认识的全部字段，配置前照着示例改即可，不用从零手写 JSON。
+
+- `accounts.json` 的字段说明：[填写 accounts.json](#2-填写-accountsjson)
+- `multisite_accounts.json` 的字段说明：[多站点访问令牌签到](#多站点访问令牌签到)
+
 ## 使用方法
 
 ### 1. Fork 本仓库
 
-点击右上角的 "Fork" 按钮，将本仓库 fork 到你的账户。
+点击右上角的 "Fork" 按钮，将本仓库 fork 到你的账户。GitHub Actions 只跑 provider 签到（`accounts.json` / `ANYROUTER_ACCOUNTS`）；多站点访问令牌签到需要手动完成 Turnstile，只在本地运行。
 
-### 2. 获取账号信息
+### 2. 填写 accounts.json
 
-对于每个需要签到的账号，你需要获取：(可借助 [在线 Secrets 配置生成器](https://millylee.github.io/anyrouter-check-in/))
-
-1. **Cookies**: 用于身份验证
-2. **API User**: 用于请求头的 new-api-user 参数（自己配置其它平台时该值需要注意匹配）
-
-#### 获取 Cookies：
-
-1. 打开浏览器，访问 https://anyrouter.top/
-2. 登录你的账户
-3. 打开开发者工具 (F12)
-4. 切换到 "Application" 或 "存储" 选项卡
-5. 找到 "Cookies" 选项
-6. 复制所有 cookies
-
-#### 获取 API User：
-
-按照下方图片教程操作获得。
-
-### 3. 设置 GitHub Environment Secret
-
-1. 在你 fork 的仓库中，点击 "Settings" 选项卡
-2. 在左侧菜单中找到 "Environments" -> "New environment"
-3. 新建一个名为 `production` 的环境
-4. 点击新建的 `production` 环境进入环境配置页
-5. 点击 "Add environment secret" 创建 secret：
-   - Name: `ANYROUTER_ACCOUNTS`
-   - Value: 你的多账号配置数据
-
-### 4. 多账号配置格式
-
-支持单个与多个账号配置，可选 `name` 和 `provider` 字段：
+`accounts.example.json` 预置了 3 个 `anyrouter` + 4 个 `agentrouter` 账号模板，删掉用不到的条目，再把占位文字换成真实值。每个账号长这样（可借助 [在线 Secrets 配置生成器](https://millylee.github.io/anyrouter-check-in/)）：
 
 ```json
 [
   {
-    "name": "我的主账号",
-    "email": "account1@example.com",
-    "password": "account1_password"
-  },
-  {
-    "name": "备用账号",
-    "provider": "agentrouter",
-    "email": "account2@example.com",
-    "password": "account2_password"
+    "name": "anyrouter-1",
+    "provider": "anyrouter",
+    "email": "填写 anyrouter-1 的邮箱",
+    "password": "填写 anyrouter-1 的密码",
+    "cookies": {
+      "session": "填写 anyrouter-1 的 session"
+    },
+    "api_user": "填写 anyrouter-1 的 new-api-user"
   }
 ]
 ```
+
+推荐只留 `email` + `password`（浏览器登录后自动获取 cookies 与用户标识），用 session cookies 登录时才需要 `cookies` 和 `api_user`。
 
 **字段说明**：
 
@@ -92,7 +83,7 @@
 - 如果未提供 `name` 字段，会使用 `Account 1`、`Account 2` 等默认名称
 - `anyrouter` 与 `agentrouter` 配置已内置，无需填写
 
-如果使用 session cookies 登录，接下来获取 cookies 与 api_user 的值。
+#### 获取 session 与 api_user（仅 cookies 登录需要）
 
 通过 F12 工具，切到 Application 面板，拿到 session 的值，最好重新登录下，该值 1 个月有效期，但有可能提前失效，失效后报 401 错误，到时请再重新获取。
 
@@ -102,14 +93,32 @@
 
 ![获取 api_user](./assets/request-api-user.png)
 
-### 5. 启用 GitHub Actions
+### 3. 本地运行或同步到 GitHub Secret
+
+本地运行不需要 secret，填好 `accounts.json` 直接跑（依赖安装见[本地开发环境设置](#本地开发环境设置)）：
+
+```bash
+uv run checkin.py
+```
+
+要用 GitHub Actions 定时签到，把 `accounts.json` 的**全部内容**（同一份 JSON 数组）粘贴成一个 secret：
+
+1. 在你 fork 的仓库中，点击 "Settings" 选项卡
+2. 在左侧菜单中找到 "Environments" -> "New environment"
+3. 新建一个名为 `production` 的环境
+4. 点击新建的 `production` 环境进入环境配置页
+5. 点击 "Add environment secret" 创建 secret：
+   - Name: `ANYROUTER_ACCOUNTS`
+   - Value: `accounts.json` 的内容
+
+### 4. 启用 GitHub Actions
 
 1. 在你的仓库中，点击 "Actions" 选项卡
 2. 如果提示启用 Actions，请点击启用
 3. 找到 "AnyRouter 自动签到" workflow
 4. 点击 "Enable workflow"
 
-### 6. 测试运行
+### 5. 测试运行
 
 你可以手动触发一次签到来测试：
 
@@ -134,9 +143,11 @@
 
 ## 配置示例
 
-### 基础配置（向后兼容）
+`accounts.example.json` 本身就是多服务商示例（anyrouter + agentrouter 混在一个数组里），直接删条目、改值即可。下面只列它没覆盖到的写法。
 
-假设你有两个账号需要签到，不指定 provider 时默认使用 anyrouter：
+### 只用 session cookies（向后兼容）
+
+不写 `provider` 时默认 `anyrouter`，不写 `name` 时用 `Account 1`、`Account 2`：
 
 ```json
 [
@@ -145,37 +156,6 @@
       "session": "abc123session"
     },
     "api_user": "user123"
-  },
-  {
-    "cookies": {
-      "session": "xyz789session"
-    },
-    "api_user": "user456"
-  }
-]
-```
-
-### 多服务商配置
-
-如果你需要同时使用多个服务商（如 anyrouter 和 agentrouter）：
-
-```json
-[
-  {
-    "name": "AnyRouter 主账号",
-    "provider": "anyrouter",
-    "cookies": {
-      "session": "abc123session"
-    },
-    "api_user": "user123"
-  },
-  {
-    "name": "AgentRouter 备用",
-    "provider": "agentrouter",
-    "cookies": {
-      "session": "xyz789session"
-    },
-    "api_user": "user456"
   }
 ]
 ```
@@ -363,13 +343,15 @@ uv sync --dev
 uv run python -m cloakbrowser install
 # 如需使用本地浏览器，可设置 CLOAKBROWSER_BINARY_PATH=/path/to/browser
 
-# 创建本地配置文件
+# 创建本地配置文件（字段以示例文件为准，详见上面的「配置文件」一节）
 cp .env.example .env
 cp accounts.example.json accounts.json
+cp multisite_accounts.example.json multisite_accounts.json
 
-# 编辑 accounts.json，填写每个账号的 session 与 api_user
-# .env 默认通过下面的配置加载该文件：
+# 编辑 accounts.json / multisite_accounts.json，把占位文字换成真实值
+# .env 默认通过下面的配置加载账号文件：
 # ANYROUTER_ACCOUNTS_FILE=accounts.json
+# MULTISITE_ACCOUNTS_FILE=multisite_accounts.json
 # PROVIDERS={"agentrouter":{"domain":"https://agentrouter.org"}}
 # PROXY_SUBSCRIPTION_URL=https://example.com/sub?token=xxx
 # CHECKIN_PROXY_URL=http://127.0.0.1:7890
@@ -378,7 +360,7 @@ cp accounts.example.json accounts.json
 uv run checkin.py
 ```
 
-`accounts.json` 已加入 `.gitignore`，不会被 Git 提交。文件中的账号格式与 `ANYROUTER_ACCOUNTS` 完全相同，但可以换行并逐个维护账号。如果同时配置 `ANYROUTER_ACCOUNTS_FILE` 和 `ANYROUTER_ACCOUNTS`，脚本优先读取账号文件；文件不存在或格式错误时会停止运行，不会回退到旧环境变量。
+`accounts.json` 与 `multisite_accounts.json` 都已加入 `.gitignore`，不会被 Git 提交。`accounts.json` 的格式与 `ANYROUTER_ACCOUNTS` 完全相同，但可以换行并逐个维护账号。如果同时配置 `ANYROUTER_ACCOUNTS_FILE` 和 `ANYROUTER_ACCOUNTS`，脚本优先读取账号文件；文件不存在或格式错误时会停止运行，不会回退到旧环境变量。
 
 若仍需使用单行环境变量，可删除 `ANYROUTER_ACCOUNTS_FILE`，再在 `.env` 中配置 `ANYROUTER_ACCOUNTS`。
 
@@ -399,31 +381,25 @@ uv run pytest tests/ --cov=. --cov-report=html
 
 ## 多站点访问令牌签到
 
-所有 New API 站点可以共用一个本地签到脚本及账号文件。首次配置：
+所有 New API 站点共用一个本地签到脚本和一个账号文件。首次配置：
 
 ```bash
 cp multisite_accounts.example.json multisite_accounts.json
 ```
 
-编辑 `multisite_accounts.json`，按需保留账号。内置站点（`site` 直接填写即可，无需 `url`）：`tabitoken`、`gorouter`、`justwoker`、`kktoken`。
+`multisite_accounts.example.json` 的 5 个条目正好覆盖了全部写法，删掉用不到的、改掉占位文字就能用：
 
-```json
-[
-  {
-    "site": "kktoken",
-    "name": "我的 KKToken",
-    "access_token": "你的访问令牌"
-  },
-  {
-    "site": "gorouter",
-    "name": "我的 GoRouter",
-    "access_token": "你的访问令牌",
-    "api_user": "你的 New-Api-User"
-  }
-]
-```
+| 示例条目 | 演示的写法 |
+| --- | --- |
+| `tabitoken-1` | 内置站点最简写法：只要 `site` + `name` + `access_token` |
+| `gorouter-1` | 站点需要 `New-Api-User` 请求头，额外填 `api_user` |
+| `justwoker-1` | 另一个内置站点，同最简写法 |
+| `kktoken-1` | 只能走代理的站点，带 `"requires_proxy": true` |
+| `自定义站点标识` | 未内置的站点：`site` 自定义标识 + `url` 指定地址 |
 
-新增站点不需要改代码：`site` 填一个自定义标识（用于日志和独立浏览器 profile 目录，不能包含 `/` 或 `\`），再用 `url` 指定站点地址即可。
+内置站点（`site` 直接填，无需 `url`）：`tabitoken`、`gorouter`、`justwoker`、`kktoken`。
+
+新增站点不需要改代码，照抄示例文件最后那个条目即可：`site` 填一个自定义标识（用于日志和独立浏览器 profile 目录，不能包含 `/` 或 `\`），`url` 填站点地址。
 
 ```json
 [
@@ -447,6 +423,10 @@ uv run python multisite_checkin.py
 ```
 
 脚本会按账号顺序打开有头浏览器，每个站点和账号使用独立的持久化 profile。若出现 Cloudflare Turnstile，请在窗口中手动完成验证。`MULTISITE_ACCOUNTS_FILE` 可指定其它 JSON 文件；真实配置文件已加入 `.gitignore`。
+
+多站点脚本默认只让声明了 `requires_proxy` 的站点走 `CHECKIN_PROXY_URL`，其余账号保持直连（避免出口 IP 变化触发风控）；某个账号想强制走代理可加 `"use_proxy": true`，反之加 `"use_proxy": false` 强制直连。若站点在当前网络被 Cloudflare 防火墙拦截（页面打不开、返回 HTTP 403 `Attention Required!`），脚本会输出 `[BLOCKED]` 并把结果记为 `site_unreachable`，不会再去等 Turnstile。
+
+KKToken（`kktoken.cc`）只能通过代理访问，内置预设已标记 `requires_proxy`，示例文件的 `kktoken-1` 条目也写着 `"requires_proxy": true`：没配 `CHECKIN_PROXY_URL` 时脚本直接跳过该账号并提示，不会白开一次浏览器。自定义站点照抄这一行即可声明同样的限制；反过来，若你的网络能直连 KKToken，写 `"requires_proxy": false` 就能关掉（同时也不再默认走代理）。
 
 配置 `DINGDING_WEBHOOK` 后，每次多站点签到结束都会发送账号结果汇总。钉钉机器人自定义安全关键字需设置为 `tabitoken`；通知标题固定包含该关键字，消息不会包含访问令牌或 Turnstile 响应。
 
