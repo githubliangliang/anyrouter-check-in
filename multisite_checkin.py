@@ -10,10 +10,12 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
+
+from utils.proxy import get_playwright_proxy
 
 MULTISITE_PROFILE_PATH = '/sign-in'
 MULTISITE_USER_PATH = '/api/user/self'
@@ -27,16 +29,18 @@ class SiteConfig:
 	user_path: str = MULTISITE_USER_PATH
 	checkin_path: str = MULTISITE_CHECKIN_PATH
 	api_user_header: str | None = None
+	requires_proxy: bool = False
 
 
 SUPPORTED_SITES = {
 	'tabitoken': SiteConfig(domain='https://tabitoken.com'),
 	'gorouter': SiteConfig(domain='https://gorouter.app', api_user_header='New-Api-User'),
 	'justwoker': SiteConfig(domain='https://api.justwoker.icu'),
-	'kktoken': SiteConfig(domain='https://kktoken.cc'),
+	'kktoken': SiteConfig(domain='https://kktoken.cc', requires_proxy=True),
 }
 
 SITE_CONFIG_OVERRIDE_KEYS = ('profile_path', 'user_path', 'checkin_path', 'api_user_header')
+BLOCK_KEYWORDS = ('attention required', 'you have been blocked', 'access denied', 'error code: 1020')
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,7 @@ class MultisiteAccount:
 	access_token: str
 	api_user: str | None = None
 	site_config: SiteConfig | None = None
+	use_proxy: bool | None = None
 
 
 class MultisiteOutcome(Enum):
@@ -53,6 +58,7 @@ class MultisiteOutcome(Enum):
 	ALREADY_CHECKED = 'already_checked'
 	NEEDS_TURNSTILE = 'needs_turnstile'
 	AUTH_FAILED = 'auth_failed'
+	SITE_UNREACHABLE = 'site_unreachable'
 	TURNSTILE_TIMEOUT = 'turnstile_timeout'
 	FAILED = 'failed'
 
@@ -62,6 +68,7 @@ class MultisiteBrowserSettings:
 	headless: bool
 	persist_profile: bool
 	profile_dir: Path
+	proxy: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -150,15 +157,27 @@ def _optional_str(item: dict, key: str, index: int) -> str | None:
 	return value.strip()
 
 
+def _optional_bool(item: dict, key: str, index: int) -> bool | None:
+	value = item.get(key)
+	if value is None:
+		return None
+	if not isinstance(value, bool):
+		raise ValueError(f'Multisite account {index} requires {key} to be true or false')
+	return value
+
+
 def build_site_config(site: str, item: dict, *, index: int = 1) -> SiteConfig | None:
 	"""Return a per-account SiteConfig, or None when the built-in preset is enough."""
 	url = _optional_str(item, 'url', index) or _optional_str(item, 'domain', index)
-	overrides = {}
+	overrides: dict[str, Any] = {}
 	for key in SITE_CONFIG_OVERRIDE_KEYS:
 		value = _optional_str(item, key, index)
 		if value is None:
 			continue
 		overrides[key] = value if key == 'api_user_header' or value.startswith('/') else f'/{value}'
+	requires_proxy = _optional_bool(item, 'requires_proxy', index)
+	if requires_proxy is not None:
+		overrides['requires_proxy'] = requires_proxy
 	preset = SUPPORTED_SITES.get(site)
 	if url is None:
 		if preset is None:
@@ -209,6 +228,9 @@ def load_multisite_accounts() -> list[MultisiteAccount]:
 		if not isinstance(access_token, str) or not access_token.strip():
 			raise ValueError(f'Multisite account {index} requires a non-empty access_token')
 		site_name = site.strip()
+		use_proxy = item.get('use_proxy')
+		if use_proxy is not None and not isinstance(use_proxy, bool):
+			raise ValueError(f'Multisite account {index} requires use_proxy to be true or false')
 		site_config = build_site_config(site_name, item, index=index)
 		api_user = item.get('api_user')
 		expects_api_user = (site_config or SUPPORTED_SITES[site_name]).api_user_header is not None
@@ -221,6 +243,7 @@ def load_multisite_accounts() -> list[MultisiteAccount]:
 				access_token=access_token.strip(),
 				api_user=api_user.strip() if isinstance(api_user, str) else None,
 				site_config=site_config,
+				use_proxy=use_proxy,
 			)
 		)
 	return accounts
@@ -243,6 +266,12 @@ def redact_error(error: Exception, access_token: str) -> str:
 	return message.replace(access_token, '[REDACTED]') if access_token else message
 
 
+def _looks_blocked(status_code: int, payload: dict, message: str) -> bool:
+	if any(keyword in message for keyword in BLOCK_KEYWORDS):
+		return True
+	return bool(payload.get('non_json')) and status_code in {403, 429, 503}
+
+
 def classify_checkin_response(status_code: int, payload: object) -> MultisiteOutcome:
 	if not isinstance(payload, dict):
 		return MultisiteOutcome.FAILED
@@ -251,6 +280,8 @@ def classify_checkin_response(status_code: int, payload: object) -> MultisiteOut
 
 	message = str(payload.get('message', '')).lower()
 	code = str(payload.get('code', '')).lower()
+	if _looks_blocked(status_code, payload, message):
+		return MultisiteOutcome.SITE_UNREACHABLE
 	if any(keyword in message for keyword in ('turnstile', 'verify you are human', 'cloudflare', 'challenge')):
 		return MultisiteOutcome.NEEDS_TURNSTILE
 	if status_code in {401, 403} or 'unauthorized' in message or code == 'auth_unauthorized':
@@ -262,10 +293,16 @@ def classify_checkin_response(status_code: int, payload: object) -> MultisiteOut
 
 def load_multisite_browser_settings(account: MultisiteAccount) -> MultisiteBrowserSettings:
 	profile_base = Path(os.getenv('CHECKIN_BROWSER_PROFILE_DIR', '.browser_profiles'))
+	# Only proxy-only sites go through the proxy by default; the rest keep their direct egress.
+	use_proxy = resolve_site_config(account).requires_proxy if account.use_proxy is None else account.use_proxy
+	proxy = get_playwright_proxy(use_proxy=use_proxy)
+	if proxy is None and account.use_proxy:
+		print(f'[WARN] {account.site}/{account.name}: use_proxy is set but CHECKIN_PROXY_URL is empty')
 	return MultisiteBrowserSettings(
 		headless=False,
 		persist_profile=True,
 		profile_dir=profile_base / 'multisite' / account.site / account.name,
+		proxy=proxy,
 	)
 
 
@@ -289,7 +326,7 @@ async ({path, method, headers, use_turnstile}) => {
   const text = await response.text();
   let payload;
   try { payload = JSON.parse(text); }
-  catch { payload = {success: false, message: text.slice(0, 300)}; }
+  catch { payload = {success: false, non_json: true, message: text.slice(0, 300)}; }
   return {status: response.status, payload};
 }
 """
@@ -360,6 +397,8 @@ async def check_in_with_page(
 ) -> MultisiteCheckinResult:
 	user_response = await _page_request(page, account, site_config.user_path, site_config)
 	user_outcome = classify_checkin_response(user_response.get('status', 0), user_response.get('payload'))
+	if user_outcome == MultisiteOutcome.SITE_UNREACHABLE:
+		return MultisiteCheckinResult(MultisiteOutcome.SITE_UNREACHABLE)
 	if user_outcome == MultisiteOutcome.NEEDS_TURNSTILE:
 		if not await _wait_for_turnstile(page, account, turnstile_timeout_ms):
 			return MultisiteCheckinResult(MultisiteOutcome.TURNSTILE_TIMEOUT)
@@ -402,30 +441,56 @@ async def launch_multisite_context(settings: MultisiteBrowserSettings):
 	from cloakbrowser import launch_persistent_context_async
 
 	settings.profile_dir.mkdir(parents=True, exist_ok=True)
-	launch_kwargs = {
+	launch_kwargs: dict = {
 		'headless': settings.headless,
 		'viewport': {'width': 1280, 'height': 900},
 	}
+	if settings.proxy:
+		launch_kwargs['proxy'] = settings.proxy
+		print('[INFO] Browser proxy enabled')
 	if _env_bool('CHECKIN_HUMANIZE', True):
 		launch_kwargs['humanize'] = True
 		launch_kwargs['human_preset'] = 'careful'
 	return await launch_persistent_context_async(str(settings.profile_dir), **launch_kwargs)
 
 
+async def open_site_page(page, account: MultisiteAccount, site_config: SiteConfig, *, timeout_ms: int) -> bool:
+	url = f'{site_config.domain}{site_config.profile_path}'
+	try:
+		response = await page.goto(url, wait_until='domcontentloaded', timeout=timeout_ms)
+	except Exception as error:
+		print(
+			f'[BLOCKED] {account.site}/{account.name}: cannot open {url}: {redact_error(error, account.access_token)[:200]}'
+		)
+		return False
+	status = response.status if response is not None else 0
+	if response is None or status >= 400:
+		detail = f'HTTP {status}' if response is not None else 'no response'
+		print(
+			f'[BLOCKED] {account.site}/{account.name}: {url} returned {detail}; '
+			'the site may block this network (try CHECKIN_PROXY_URL)'
+		)
+		return False
+	return True
+
+
 async def run_multisite_account(account: MultisiteAccount) -> MultisiteCheckinResult:
 	site_config = resolve_site_config(account)
 	settings = load_multisite_browser_settings(account)
+	if site_config.requires_proxy and settings.proxy is None:
+		print(
+			f'[BLOCKED] {account.site}/{account.name}: this site is only reachable through a proxy; '
+			'set CHECKIN_PROXY_URL (and keep the account use_proxy unset or true)'
+		)
+		return MultisiteCheckinResult(MultisiteOutcome.SITE_UNREACHABLE)
 	page_timeout_ms = int(os.getenv('MULTISITE_PAGE_TIMEOUT_MS', '60000'))
 	turnstile_timeout_ms = int(os.getenv('MULTISITE_TURNSTILE_TIMEOUT_MS', '120000'))
 	context = None
 	try:
 		context = await launch_multisite_context(settings)
 		page = await context.new_page()
-		await page.goto(
-			f'{site_config.domain}{site_config.profile_path}',
-			wait_until='domcontentloaded',
-			timeout=page_timeout_ms,
-		)
+		if not await open_site_page(page, account, site_config, timeout_ms=page_timeout_ms):
+			return MultisiteCheckinResult(MultisiteOutcome.SITE_UNREACHABLE)
 		return await check_in_with_page(
 			page,
 			account,

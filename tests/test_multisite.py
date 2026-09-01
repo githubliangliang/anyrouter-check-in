@@ -23,9 +23,11 @@ from multisite_checkin import (
 	load_multisite_browser_settings,
 	main,
 	normalize_site_url,
+	open_site_page,
 	redact_error,
 	resolve_site_config,
 	run_all_multisite_accounts,
+	run_multisite_account,
 	send_dingtalk_summary,
 )
 
@@ -557,3 +559,327 @@ def test_browser_profile_isolates_custom_sites(monkeypatch, tmp_path):
 	settings = load_multisite_browser_settings(account)
 
 	assert settings.profile_dir == tmp_path / 'multisite' / 'newapi' / 'one'
+
+
+class FakeResponse:
+	def __init__(self, status):
+		self.status = status
+
+
+class FakeNavigationPage:
+	def __init__(self, result):
+		self.result = result
+		self.goto_calls = []
+
+	async def goto(self, url, wait_until, timeout):
+		self.goto_calls.append((url, wait_until, timeout))
+		if isinstance(self.result, Exception):
+			raise self.result
+		return self.result
+
+
+@pytest.mark.asyncio
+async def test_open_site_page_accepts_successful_navigation():
+	page = FakeNavigationPage(FakeResponse(200))
+
+	assert await open_site_page(
+		page,
+		MultisiteAccount('kktoken', 'primary', 'token'),
+		SUPPORTED_SITES['kktoken'],
+		timeout_ms=1000,
+	)
+	assert page.goto_calls[0][0] == 'https://kktoken.cc/sign-in'
+
+
+@pytest.mark.asyncio
+async def test_open_site_page_reports_firewall_status(capsys):
+	page = FakeNavigationPage(FakeResponse(403))
+
+	assert not await open_site_page(
+		page,
+		MultisiteAccount('kktoken', 'primary', 'token'),
+		SUPPORTED_SITES['kktoken'],
+		timeout_ms=1000,
+	)
+	output = capsys.readouterr().out
+	assert 'HTTP 403' in output
+	assert 'CHECKIN_PROXY_URL' in output
+
+
+@pytest.mark.asyncio
+async def test_open_site_page_hides_token_from_navigation_error(capsys):
+	page = FakeNavigationPage(TimeoutError('net::ERR_TIMED_OUT secret-token'))
+
+	assert not await open_site_page(
+		page,
+		MultisiteAccount('kktoken', 'primary', 'secret-token'),
+		SUPPORTED_SITES['kktoken'],
+		timeout_ms=1000,
+	)
+	output = capsys.readouterr().out
+	assert 'cannot open https://kktoken.cc/sign-in' in output
+	assert 'secret-token' not in output
+
+
+@pytest.mark.asyncio
+async def test_unreachable_account_skips_browser_check_in(monkeypatch):
+	from multisite_checkin import run_multisite_account
+
+	class FakeContext:
+		def __init__(self):
+			self.closed = False
+
+		async def new_page(self):
+			return FakeNavigationPage(FakeResponse(403))
+
+		async def close(self):
+			self.closed = True
+
+	context = FakeContext()
+
+	async def fake_launch(_settings):
+		return context
+
+	async def fail_check_in(*_args, **_kwargs):
+		raise AssertionError('check-in must not run when the site is blocked')
+
+	monkeypatch.setattr('multisite_checkin.launch_multisite_context', fake_launch)
+	monkeypatch.setattr('multisite_checkin.check_in_with_page', fail_check_in)
+
+	result = await run_multisite_account(MultisiteAccount('kktoken', 'primary', 'token'))
+
+	assert result.outcome == MultisiteOutcome.SITE_UNREACHABLE
+	assert context.closed is True
+
+
+def test_firewall_html_is_not_mistaken_for_turnstile_or_auth_failure():
+	blocked = {'success': False, 'non_json': True, 'message': '<!DOCTYPE html><html class="no-js" lang="en-US">'}
+
+	assert classify_checkin_response(403, blocked) == MultisiteOutcome.SITE_UNREACHABLE
+	assert classify_checkin_response(503, blocked) == MultisiteOutcome.SITE_UNREACHABLE
+	assert (
+		classify_checkin_response(403, {'success': False, 'message': 'Attention Required! | Cloudflare'})
+		== MultisiteOutcome.SITE_UNREACHABLE
+	)
+	assert (
+		classify_checkin_response(200, {'success': False, 'non_json': True, 'message': '<html></html>'})
+		== MultisiteOutcome.FAILED
+	)
+	assert (
+		classify_checkin_response(403, {'success': False, 'message': 'Cloudflare Turnstile challenge required'})
+		== MultisiteOutcome.NEEDS_TURNSTILE
+	)
+
+
+@pytest.mark.asyncio
+async def test_blocked_user_endpoint_reports_site_unreachable():
+	page = FakePage([{'status': 403, 'payload': {'success': False, 'non_json': True, 'message': '<html>'}}])
+
+	result = await check_in_with_page(
+		page,
+		MultisiteAccount('kktoken', 'primary', 'secret-token'),
+		SUPPORTED_SITES['kktoken'],
+	)
+
+	assert result.outcome == MultisiteOutcome.SITE_UNREACHABLE
+	assert page.wait_calls == []
+
+
+def test_browser_settings_use_proxy_when_configured(monkeypatch, tmp_path):
+	monkeypatch.setenv('CHECKIN_BROWSER_PROFILE_DIR', str(tmp_path))
+	monkeypatch.setenv('CHECKIN_PROXY_URL', 'http://127.0.0.1:7890')
+
+	assert load_multisite_browser_settings(MultisiteAccount('kktoken', 'primary', 'token')).proxy == {
+		'server': 'http://127.0.0.1:7890'
+	}
+	assert (
+		load_multisite_browser_settings(MultisiteAccount('kktoken', 'primary', 'token', use_proxy=False)).proxy is None
+	)
+
+
+def test_browser_settings_have_no_proxy_without_env(monkeypatch, tmp_path, capsys):
+	monkeypatch.setenv('CHECKIN_BROWSER_PROFILE_DIR', str(tmp_path))
+	monkeypatch.delenv('CHECKIN_PROXY_URL', raising=False)
+
+	settings = load_multisite_browser_settings(MultisiteAccount('kktoken', 'primary', 'token', use_proxy=True))
+
+	assert settings.proxy is None
+	assert 'CHECKIN_PROXY_URL is empty' in capsys.readouterr().out
+
+
+def test_account_use_proxy_is_loaded_from_config(monkeypatch, tmp_path):
+	accounts_file = tmp_path / 'proxy.json'
+	accounts_file.write_text(
+		json.dumps(
+			[
+				{'site': 'kktoken', 'name': 'proxied', 'access_token': 'token', 'use_proxy': True},
+				{'site': 'kktoken', 'name': 'direct', 'access_token': 'token', 'use_proxy': False},
+				{'site': 'kktoken', 'name': 'default', 'access_token': 'token'},
+			]
+		),
+		encoding='utf-8',
+	)
+	monkeypatch.setenv('MULTISITE_ACCOUNTS_FILE', str(accounts_file))
+
+	assert [account.use_proxy for account in load_multisite_accounts()] == [True, False, None]
+
+
+def test_use_proxy_must_be_boolean(monkeypatch, tmp_path):
+	accounts_file = tmp_path / 'bad-proxy.json'
+	accounts_file.write_text(
+		json.dumps([{'site': 'kktoken', 'name': 'one', 'access_token': 'token', 'use_proxy': 'yes'}]),
+		encoding='utf-8',
+	)
+	monkeypatch.setenv('MULTISITE_ACCOUNTS_FILE', str(accounts_file))
+
+	with pytest.raises(ValueError, match='use_proxy'):
+		load_multisite_accounts()
+
+
+def test_dingtalk_summary_shows_unreachable_site():
+	results = [
+		MultisiteAccountResult(
+			account=MultisiteAccount('kktoken', 'primary', 'secret-token'),
+			outcome=MultisiteOutcome.SITE_UNREACHABLE,
+		)
+	]
+
+	_, content = format_dingtalk_summary(results, executed_at=datetime(2026, 9, 1, 9, 0))
+
+	assert 'kktoken/primary: site_unreachable' in content
+	assert '失败: 1' in content
+
+
+def test_kktoken_preset_is_marked_proxy_only():
+	assert SUPPORTED_SITES['kktoken'].requires_proxy is True
+	assert SUPPORTED_SITES['tabitoken'].requires_proxy is False
+	assert SUPPORTED_SITES['gorouter'].requires_proxy is False
+	assert SUPPORTED_SITES['justwoker'].requires_proxy is False
+
+
+@pytest.mark.asyncio
+async def test_proxy_only_site_fails_fast_without_proxy(monkeypatch, capsys):
+	monkeypatch.delenv('CHECKIN_PROXY_URL', raising=False)
+
+	async def fail_launch(_settings):
+		raise AssertionError('the browser must not launch without the required proxy')
+
+	monkeypatch.setattr('multisite_checkin.launch_multisite_context', fail_launch)
+
+	result = await run_multisite_account(MultisiteAccount('kktoken', 'primary', 'secret-token'))
+
+	assert result.outcome == MultisiteOutcome.SITE_UNREACHABLE
+	output = capsys.readouterr().out
+	assert 'only reachable through a proxy' in output
+	assert 'CHECKIN_PROXY_URL' in output
+	assert 'secret-token' not in output
+
+
+@pytest.mark.asyncio
+async def test_proxy_only_site_launches_browser_with_proxy(monkeypatch):
+	monkeypatch.setenv('CHECKIN_PROXY_URL', 'http://127.0.0.1:7890')
+	launched = []
+
+	class FakeContext:
+		async def new_page(self):
+			return FakeNavigationPage(FakeResponse(200))
+
+		async def close(self):
+			pass
+
+	async def fake_launch(settings):
+		launched.append(settings.proxy)
+		return FakeContext()
+
+	async def fake_check_in(_page, _account, _site_config, **_kwargs):
+		return MultisiteCheckinResult(MultisiteOutcome.SUCCESS)
+
+	monkeypatch.setattr('multisite_checkin.launch_multisite_context', fake_launch)
+	monkeypatch.setattr('multisite_checkin.check_in_with_page', fake_check_in)
+
+	result = await run_multisite_account(MultisiteAccount('kktoken', 'primary', 'token'))
+
+	assert result.outcome == MultisiteOutcome.SUCCESS
+	assert launched == [{'server': 'http://127.0.0.1:7890'}]
+
+
+@pytest.mark.asyncio
+async def test_proxy_only_site_respects_explicit_direct_account(monkeypatch, capsys):
+	monkeypatch.setenv('CHECKIN_PROXY_URL', 'http://127.0.0.1:7890')
+
+	async def fail_launch(_settings):
+		raise AssertionError('use_proxy=false must not silently fall back to the proxy')
+
+	monkeypatch.setattr('multisite_checkin.launch_multisite_context', fail_launch)
+
+	result = await run_multisite_account(MultisiteAccount('kktoken', 'primary', 'token', use_proxy=False))
+
+	assert result.outcome == MultisiteOutcome.SITE_UNREACHABLE
+	assert 'only reachable through a proxy' in capsys.readouterr().out
+
+
+def test_custom_site_can_declare_requires_proxy(monkeypatch, tmp_path):
+	accounts_file = tmp_path / 'requires-proxy.json'
+	accounts_file.write_text(
+		json.dumps(
+			[
+				{
+					'site': 'newapi',
+					'url': 'https://newapi.example.com',
+					'name': 'one',
+					'access_token': 'token',
+					'requires_proxy': True,
+				}
+			]
+		),
+		encoding='utf-8',
+	)
+	monkeypatch.setenv('MULTISITE_ACCOUNTS_FILE', str(accounts_file))
+
+	assert resolve_site_config(load_multisite_accounts()[0]).requires_proxy is True
+
+
+def test_requires_proxy_must_be_boolean(monkeypatch, tmp_path):
+	accounts_file = tmp_path / 'bad-requires-proxy.json'
+	accounts_file.write_text(
+		json.dumps([{'site': 'kktoken', 'name': 'one', 'access_token': 'token', 'requires_proxy': 'yes'}]),
+		encoding='utf-8',
+	)
+	monkeypatch.setenv('MULTISITE_ACCOUNTS_FILE', str(accounts_file))
+
+	with pytest.raises(ValueError, match='requires_proxy'):
+		load_multisite_accounts()
+
+
+def test_preset_requires_proxy_can_be_turned_off_per_account(monkeypatch, tmp_path):
+	accounts_file = tmp_path / 'kktoken-direct.json'
+	accounts_file.write_text(
+		json.dumps([{'site': 'kktoken', 'name': 'one', 'access_token': 'token', 'requires_proxy': False}]),
+		encoding='utf-8',
+	)
+	monkeypatch.setenv('MULTISITE_ACCOUNTS_FILE', str(accounts_file))
+
+	config = resolve_site_config(load_multisite_accounts()[0])
+
+	assert config.requires_proxy is False
+	assert config.domain == 'https://kktoken.cc'
+
+
+def test_direct_sites_keep_direct_egress_by_default(monkeypatch, tmp_path):
+	monkeypatch.setenv('CHECKIN_BROWSER_PROFILE_DIR', str(tmp_path))
+	monkeypatch.setenv('CHECKIN_PROXY_URL', 'http://127.0.0.1:7890')
+
+	assert load_multisite_browser_settings(MultisiteAccount('tabitoken', 'primary', 'token')).proxy is None
+	assert load_multisite_browser_settings(MultisiteAccount('gorouter', 'primary', 'token')).proxy is None
+	assert load_multisite_browser_settings(MultisiteAccount('kktoken', 'primary', 'token')).proxy == {
+		'server': 'http://127.0.0.1:7890'
+	}
+
+
+def test_direct_site_can_opt_into_the_proxy(monkeypatch, tmp_path):
+	monkeypatch.setenv('CHECKIN_BROWSER_PROFILE_DIR', str(tmp_path))
+	monkeypatch.setenv('CHECKIN_PROXY_URL', 'http://127.0.0.1:7890')
+
+	settings = load_multisite_browser_settings(MultisiteAccount('tabitoken', 'primary', 'token', use_proxy=True))
+
+	assert settings.proxy == {'server': 'http://127.0.0.1:7890'}

@@ -18,7 +18,8 @@
   {
     "site": "kktoken",
     "name": "kktoken-1",
-    "access_token": "填写 KKToken 访问令牌"
+    "access_token": "填写 KKToken 访问令牌",
+    "requires_proxy": true
   },
   {
     "site": "自定义站点标识",
