@@ -7,13 +7,11 @@
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![License](https://img.shields.io/github/license/millylee/anyrouter-check-in)](LICENSE)
 
-多平台多账号自动签到，理论上支持所有 NewAPI、OneAPI 平台，目前内置支持 Any Router 与 Agent Router，其它可根据文档进行摸索配置。
+多平台多账号自动签到，理论上支持所有 NewAPI、OneAPI 平台，目前内置 6 个站点（见[支持的站点](#支持的站点)），其它可根据文档进行摸索配置。
 
 推荐搭配使用[Auo](https://github.com/millylee/auo)，支持任意 Claude Code Token 切换的工具。
 
 **维护开源不易，如果本项目帮助到了你，请帮忙点个 Star，谢谢!**
-
-用于 Claude Code 中转站 Any Router 网站多账号每日签到，一次 $25，限时注册即送 100 美金，[点击这里注册](https://anyrouter.top/register?aff=gSsN)。业界良心，支持 Claude Sonnet 4.5、GPT-5-Codex、Claude Code 百万上下文（使用 `/model sonnet[1m]` 开启），`gemini-2.5-pro` 模型。
 
 ## 功能特性
 
@@ -21,6 +19,21 @@
 - ✅ 单个/多账号自动签到
 - ✅ 多种机器人通知（可选）
 - ✅ 绕过 WAF 限制
+
+## 支持的站点
+
+| 站点 | 标识 | 地址 | 签到方式 | 账号文件 |
+| --- | --- | --- | --- | --- |
+| AnyRouter | `anyrouter` | `https://anyrouter.top` | 邮箱密码或 session cookies | `accounts.json` |
+| AgentRouter | `agentrouter` | `https://agentrouter.org` | 邮箱密码或 session cookies，默认走代理 | `accounts.json` |
+| Tabitoken | `tabitoken` | `https://tabitoken.com` | 访问令牌 | `multisite_accounts.json` |
+| GoRouter | `gorouter` | `https://gorouter.app` | 访问令牌 + `api_user` | `multisite_accounts.json` |
+| JustWoker | `justwoker` | `https://api.justwoker.icu` | 访问令牌 | `multisite_accounts.json` |
+| KKToken | `kktoken` | `https://kktoken.cc` | 访问令牌，只能走代理 | `multisite_accounts.json` |
+
+`accounts.json` 里的站点走 provider 签到，可以交给 GitHub Actions 定时运行；`multisite_accounts.json` 里的站点走访问令牌签到，需要本地有头浏览器手动完成 Turnstile。
+
+未内置的 NewAPI / OneAPI 站点同样不用改代码：provider 签到用 `PROVIDERS` 环境变量增配（见[自定义 Provider 配置](#自定义-provider-配置可选)），访问令牌签到在 `multisite_accounts.json` 里填 `url`（见[多站点访问令牌签到](#多站点访问令牌签到)）。
 
 ## 配置文件
 
@@ -37,7 +50,7 @@ cp accounts.example.json accounts.json                      # provider 签到
 cp multisite_accounts.example.json multisite_accounts.json  # 多站点访问令牌签到
 ```
 
-`.env.example` 里已经写好 `ANYROUTER_ACCOUNTS_FILE=accounts.json`，复制成 `.env` 即生效；多站点脚本默认就读 `multisite_accounts.json`，只有想换文件名时才需要设置 `MULTISITE_ACCOUNTS_FILE`。示例文件里出现的字段就是脚本认识的全部字段，配置前照着示例改即可，不用从零手写 JSON。
+`.env.example` 里已经写好 `ANYROUTER_ACCOUNTS_FILE=accounts.json`，复制成 `.env` 即生效；多站点脚本默认就读 `multisite_accounts.json`，只有想换文件名时才需要设置 `MULTISITE_ACCOUNTS_FILE`。配置前照着示例改即可，不用从零手写 JSON；完整字段清单见下面各自的字段说明。
 
 - `accounts.json` 的字段说明：[填写 accounts.json](#2-填写-accountsjson)
 - `multisite_accounts.json` 的字段说明：[多站点访问令牌签到](#多站点访问令牌签到)
@@ -387,7 +400,7 @@ uv run pytest tests/ --cov=. --cov-report=html
 cp multisite_accounts.example.json multisite_accounts.json
 ```
 
-`multisite_accounts.example.json` 的 5 个条目正好覆盖了全部写法，删掉用不到的、改掉占位文字就能用：
+`multisite_accounts.example.json` 是一个 JSON 数组，每个对象就是一个账号（同一站点可以放多个账号，按数组顺序逐个签到）。示例里的 5 个条目正好覆盖了全部写法，删掉用不到的、改掉占位文字就能用：
 
 | 示例条目 | 演示的写法 |
 | --- | --- |
@@ -397,9 +410,23 @@ cp multisite_accounts.example.json multisite_accounts.json
 | `kktoken-1` | 只能走代理的站点，带 `"requires_proxy": true` |
 | `自定义站点标识` | 未内置的站点：`site` 自定义标识 + `url` 指定地址 |
 
-内置站点（`site` 直接填，无需 `url`）：`tabitoken`、`gorouter`、`justwoker`、`kktoken`。
+**字段说明**：
 
-新增站点不需要改代码，照抄示例文件最后那个条目即可：`site` 填一个自定义标识（用于日志和独立浏览器 profile 目录，不能包含 `/` 或 `\`），`url` 填站点地址。
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `site` | 是 | 站点标识。内置站点直接填 `tabitoken`、`gorouter`、`justwoker`、`kktoken`（无需 `url`）；自定义站点填任意标识，它同时用作日志名和浏览器 profile 目录名，不能包含 `/` 或 `\` |
+| `name` | 是 | 账号显示名，用于日志和通知；同一站点的多个账号靠它区分，各自拥有独立的浏览器 profile |
+| `access_token` | 是 | 站点后台生成的访问令牌 |
+| `url` | 自定义站点必填 | 站点地址（等价键名 `domain`），支持带端口和子路径，末尾斜杠自动去掉；给内置站点填上即可切换到镜像域名，其余配置保持不变 |
+| `api_user` | 站点需要时必填 | `New-Api-User` 请求头的值，内置的 GoRouter 以及自己填了 `api_user_header` 的站点必须提供 |
+| `requires_proxy` | 否 | 声明站点只能走代理，默认跟随内置预设（`kktoken` 为 `true`，其余为 `false`） |
+| `use_proxy` | 否 | 单个账号强制走代理（`true`）或强制直连（`false`），不填时跟随 `requires_proxy` |
+| `profile_path` | 否 | 签到前先打开的站点页面路径，默认 `/sign-in` |
+| `user_path` | 否 | 用户信息接口，默认 `/api/user/self`，用于校验令牌和读取额度 |
+| `checkin_path` | 否 | 签到接口，默认 `/api/user/checkin` |
+| `api_user_header` | 否 | 用户标识请求头名称，例如 `New-Api-User`；填了就必须同时填 `api_user` |
+
+新增站点不需要改代码，照抄示例文件最后那个条目即可：
 
 ```json
 [
@@ -412,9 +439,7 @@ cp multisite_accounts.example.json multisite_accounts.json
 ]
 ```
 
-`url`（等价键名 `domain`）支持带端口和子路径，末尾斜杠会自动去掉。默认接口路径为 `/sign-in`、`/api/user/self`、`/api/user/checkin`；若某站点不同，可按账号覆盖 `profile_path`、`user_path`、`checkin_path`、`api_user_header`。给内置站点填 `url` 可切换到镜像域名，其余配置保持不变。
-
-需要 `New-Api-User` 请求头的站点（内置的 GoRouter，或自定义站点填了 `api_user_header`）必须同时填写 `access_token` 和 `api_user`。`api_user` 可在登录后打开浏览器开发者工具的 Network 面板，查看站点 Fetch/XHR 请求头获取；其他站点不需要该字段。
+`api_user` 可在登录站点后打开浏览器开发者工具的 Network 面板，查看 Fetch/XHR 请求头获取；不需要该请求头的站点不用填。
 
 运行多站点签到：
 
