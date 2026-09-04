@@ -12,18 +12,21 @@ from multisite_checkin import (
 	MultisiteAccountResult,
 	MultisiteCheckinResult,
 	MultisiteOutcome,
+	MultisiteQuota,
 	SiteConfig,
 	build_bearer_headers,
 	build_site_config,
 	check_in_with_page,
 	classify_checkin_response,
 	format_dingtalk_summary,
+	format_quota,
 	is_valid_site_label,
 	load_multisite_accounts,
 	load_multisite_browser_settings,
 	main,
 	normalize_site_url,
 	open_site_page,
+	parse_user_quota,
 	redact_error,
 	resolve_site_config,
 	run_all_multisite_accounts,
@@ -883,3 +886,169 @@ def test_direct_site_can_opt_into_the_proxy(monkeypatch, tmp_path):
 	settings = load_multisite_browser_settings(MultisiteAccount('tabitoken', 'primary', 'token', use_proxy=True))
 
 	assert settings.proxy == {'server': 'http://127.0.0.1:7890'}
+
+
+def test_dingtalk_summary_keeps_counts_on_one_line():
+	results = [
+		MultisiteAccountResult(
+			account=MultisiteAccount('tabitoken', 'main', 'secret-token-1'),
+			outcome=MultisiteOutcome.SUCCESS,
+		),
+		MultisiteAccountResult(
+			account=MultisiteAccount('justwoker', 'backup', 'secret-token-2'),
+			outcome=MultisiteOutcome.AUTH_FAILED,
+		),
+	]
+
+	_, content = format_dingtalk_summary(results, executed_at=datetime(2026, 9, 4, 18, 30))
+
+	lines = content.splitlines()
+
+	assert lines[0] == '执行时间: 2026-09-04 18:30:00'
+	assert lines[1] == '总计: 2 | 成功: 1 | 失败: 1'
+
+
+def test_dingtalk_summary_shows_quota_change_after_successful_checkin():
+	results = [
+		MultisiteAccountResult(
+			account=MultisiteAccount('gorouter', 'main', 'secret-token'),
+			outcome=MultisiteOutcome.SUCCESS,
+			quota=MultisiteQuota(before=12.0, after=13.0),
+		)
+	]
+
+	_, content = format_dingtalk_summary(results, executed_at=datetime(2026, 9, 4, 18, 30))
+
+	assert 'gorouter/main: success | 额度 $12.00 -> $13.00 (+$1.00)' in content
+	assert 'secret-token' not in content
+
+
+def test_dingtalk_summary_shows_current_quota_when_it_did_not_change():
+	results = [
+		MultisiteAccountResult(
+			account=MultisiteAccount('tabitoken', 'main', 'token'),
+			outcome=MultisiteOutcome.ALREADY_CHECKED,
+			quota=MultisiteQuota(before=8.0),
+		),
+		MultisiteAccountResult(
+			account=MultisiteAccount('justwoker', 'backup', 'token'),
+			outcome=MultisiteOutcome.AUTH_FAILED,
+		),
+	]
+
+	_, content = format_dingtalk_summary(results, executed_at=datetime(2026, 9, 4, 18, 30))
+
+	assert 'tabitoken/main: already_checked | 额度 $8.00' in content
+	assert 'justwoker/backup: auth_failed' in content
+	assert content.count('额度') == 1
+
+
+def test_quota_text_covers_negative_change_and_missing_data():
+	assert format_quota(MultisiteQuota(before=13.0, after=12.5)) == '额度 $13.00 -> $12.50 (-$0.50)'
+	assert format_quota(MultisiteQuota(before=13.0, after=13.0)) == '额度 $13.00'
+	assert format_quota(None) == ''
+
+
+@pytest.mark.parametrize(
+	'response',
+	[
+		None,
+		{},
+		{'payload': {'success': True}},
+		{'payload': {'success': True, 'data': {'quota': 'many'}}},
+		{'payload': {'success': True, 'data': {'quota': True}}},
+	],
+)
+def test_parse_user_quota_ignores_unusable_payloads(response):
+	assert parse_user_quota(response) is None
+
+
+def test_parse_user_quota_converts_quota_to_dollars():
+	assert parse_user_quota({'status': 200, 'payload': {'success': True, 'data': {'quota': 6_000_000}}}) == 12.0
+
+
+@pytest.mark.asyncio
+async def test_check_in_reads_quota_before_and_after_success():
+	page = FakePage(
+		[
+			{'status': 200, 'payload': {'success': True, 'data': {'quota': 6_000_000}}},
+			{'status': 200, 'payload': {'success': True, 'data': {'stats': {'checked_in_today': False}}}},
+			{'status': 200, 'payload': {'success': True, 'message': '签到成功'}},
+			{'status': 200, 'payload': {'success': True, 'data': {'stats': {'checked_in_today': True}}}},
+			{'status': 200, 'payload': {'success': True, 'data': {'quota': 6_500_000}}},
+		]
+	)
+
+	result = await check_in_with_page(
+		page,
+		MultisiteAccount('gorouter', 'primary', 'secret-token', api_user='12345'),
+		SUPPORTED_SITES['gorouter'],
+	)
+
+	assert result.outcome == MultisiteOutcome.SUCCESS
+	assert result.quota == MultisiteQuota(before=12.0, after=13.0)
+	assert page.evaluate_calls[-1]['path'] == MULTISITE_USER_PATH
+
+
+@pytest.mark.asyncio
+async def test_already_checked_reports_current_quota_without_extra_request():
+	page = FakePage(
+		[
+			{'status': 200, 'payload': {'success': True, 'data': {'quota': 4_000_000}}},
+			{'status': 200, 'payload': {'success': True, 'data': {'stats': {'checked_in_today': True}}}},
+		]
+	)
+
+	result = await check_in_with_page(
+		page,
+		MultisiteAccount('tabitoken', 'primary', 'token'),
+		SUPPORTED_SITES['tabitoken'],
+	)
+
+	assert result.outcome == MultisiteOutcome.ALREADY_CHECKED
+	assert result.quota == MultisiteQuota(before=8.0)
+	assert len(page.evaluate_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_unreadable_quota_after_checkin_keeps_success_and_hides_token(capsys):
+	class FailingQuotaPage(FakePage):
+		async def evaluate(self, script, argument):
+			if len(self.evaluate_calls) == 4:
+				raise RuntimeError('page closed while reading secret-token')
+			return await super().evaluate(script, argument)
+
+	page = FailingQuotaPage(
+		[
+			{'status': 200, 'payload': {'success': True, 'data': {'quota': 6_000_000}}},
+			{'status': 200, 'payload': {'success': True, 'data': {'stats': {'checked_in_today': False}}}},
+			{'status': 200, 'payload': {'success': True}},
+			{'status': 200, 'payload': {'success': True, 'data': {'stats': {'checked_in_today': True}}}},
+		]
+	)
+
+	result = await check_in_with_page(
+		page,
+		MultisiteAccount('tabitoken', 'primary', 'secret-token'),
+		SUPPORTED_SITES['tabitoken'],
+	)
+
+	assert result.outcome == MultisiteOutcome.SUCCESS
+	assert result.quota == MultisiteQuota(before=12.0)
+	assert 'secret-token' not in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_run_all_accounts_reports_quota_in_summary_and_log(monkeypatch, capsys):
+	notifier = FakeDingTalk()
+
+	async def fake_run(_account):
+		return MultisiteCheckinResult(MultisiteOutcome.SUCCESS, MultisiteQuota(before=8.0, after=8.5))
+
+	monkeypatch.setattr('multisite_checkin.run_multisite_account', fake_run)
+
+	exit_code = await run_all_multisite_accounts([MultisiteAccount('tabitoken', 'main', 'secret-token')], notifier)
+
+	assert exit_code == 0
+	assert '额度 $8.00 -> $8.50 (+$0.50)' in notifier.messages[0][1]
+	assert '额度 $8.00 -> $8.50 (+$0.50)' in capsys.readouterr().out

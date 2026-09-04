@@ -428,7 +428,19 @@ uv run python multisite_checkin.py
 
 KKToken（`kktoken.cc`）只能通过代理访问，内置预设已标记 `requires_proxy`，示例文件的 `kktoken-1` 条目也写着 `"requires_proxy": true`：没配 `CHECKIN_PROXY_URL` 时脚本直接跳过该账号并提示，不会白开一次浏览器。自定义站点照抄这一行即可声明同样的限制；反过来，若你的网络能直连 KKToken，写 `"requires_proxy": false` 就能关掉（同时也不再默认走代理）。
 
-配置 `DINGDING_WEBHOOK` 后，每次多站点签到结束都会发送账号结果汇总。钉钉机器人自定义安全关键字需设置为 `tabitoken`；通知标题固定包含该关键字，消息不会包含访问令牌或 Turnstile 响应。
+配置 `DINGDING_WEBHOOK` 后，每次多站点签到结束都会发送账号结果汇总：第一行执行时间，第二行统计合并成一行，之后每个账号一行结果并带上额度（签到成功时显示签到前后的额度变化，按 New API 默认 500000 额度 = $1 折算）。
+
+```text
+tabitoken 多站点签到汇总
+执行时间: 2026-09-04 18:30:00
+总计: 3 | 成功: 2 | 失败: 1
+
+tabitoken/main: success | 额度 $12.00 -> $13.00 (+$1.00)
+gorouter/main: already_checked | 额度 $8.35
+kktoken/main: site_unreachable
+```
+
+钉钉机器人自定义安全关键字需设置为 `tabitoken`；通知标题固定包含该关键字，消息不会包含访问令牌或 Turnstile 响应。
 
 ## 贡献指南
 

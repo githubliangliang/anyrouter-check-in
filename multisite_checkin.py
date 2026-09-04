@@ -41,6 +41,8 @@ SUPPORTED_SITES = {
 
 SITE_CONFIG_OVERRIDE_KEYS = ('profile_path', 'user_path', 'checkin_path', 'api_user_header')
 BLOCK_KEYWORDS = ('attention required', 'you have been blocked', 'access denied', 'error code: 1020')
+# New API bills in quota points; its default 500000 points equal one dollar.
+QUOTA_PER_UNIT = 500_000
 
 
 @dataclass(frozen=True)
@@ -72,20 +74,46 @@ class MultisiteBrowserSettings:
 
 
 @dataclass(frozen=True)
+class MultisiteQuota:
+	# Remaining quota in dollars; after stays None when only the pre-check-in reading is known.
+	before: float
+	after: float | None = None
+
+
+@dataclass(frozen=True)
 class MultisiteCheckinResult:
 	outcome: MultisiteOutcome
+	quota: MultisiteQuota | None = None
 
 
 @dataclass(frozen=True)
 class MultisiteAccountResult:
 	account: MultisiteAccount
 	outcome: MultisiteOutcome
+	quota: MultisiteQuota | None = None
 
 
 class DingTalkNotifier(Protocol):
 	dingding_webhook: str | None
 
 	def send_dingtalk(self, title: str, content: str) -> None: ...
+
+
+def format_quota(quota: MultisiteQuota | None) -> str:
+	"""Render one quota snapshot: current amount only, or the change when the check-in added quota."""
+	if quota is None:
+		return ''
+	delta = 0.0 if quota.after is None else round(quota.after - quota.before, 2)
+	if delta == 0:
+		return f'额度 ${quota.before:.2f}'
+	sign = '+' if delta > 0 else '-'
+	return f'额度 ${quota.before:.2f} -> ${quota.after:.2f} ({sign}${abs(delta):.2f})'
+
+
+def format_account_line(result: MultisiteAccountResult) -> str:
+	line = f'{result.account.site}/{result.account.name}: {result.outcome.value}'
+	quota_text = format_quota(result.quota)
+	return f'{line} | {quota_text}' if quota_text else line
 
 
 def format_dingtalk_summary(
@@ -99,13 +127,11 @@ def format_dingtalk_summary(
 	)
 	lines = [
 		f'执行时间: {executed_at.strftime("%Y-%m-%d %H:%M:%S")}',
-		f'总计: {len(results)}',
-		f'成功: {successes}',
-		f'失败: {len(results) - successes}',
+		f'总计: {len(results)} | 成功: {successes} | 失败: {len(results) - successes}',
 	]
 	if results:
 		lines.append('')
-		lines.extend(f'{result.account.site}/{result.account.name}: {result.outcome.value}' for result in results)
+		lines.extend(format_account_line(result) for result in results)
 	if config_error:
 		lines.extend(['', f'配置错误: {config_error}'])
 	return 'tabitoken 多站点签到汇总', '\n'.join(lines)
@@ -379,6 +405,37 @@ def _is_checked_in(response: object) -> bool:
 	return isinstance(stats, dict) and stats.get('checked_in_today') is True
 
 
+def parse_user_quota(response: object) -> float | None:
+	"""Read the remaining quota (in dollars) out of a /api/user/self response."""
+	if not isinstance(response, dict):
+		return None
+	payload = response.get('payload')
+	data = payload.get('data') if isinstance(payload, dict) else None
+	quota = data.get('quota') if isinstance(data, dict) else None
+	if isinstance(quota, bool) or not isinstance(quota, int | float):
+		return None
+	return round(quota / QUOTA_PER_UNIT, 2)
+
+
+async def _read_quota_after_checkin(
+	page,
+	account: MultisiteAccount,
+	site_config: SiteConfig,
+	quota: MultisiteQuota | None,
+) -> MultisiteQuota | None:
+	"""Re-read the quota once the check-in landed; a failed reading only costs the notification detail."""
+	if quota is None:
+		return None
+	try:
+		response = await _page_request(page, account, site_config.user_path, site_config)
+	except Exception as error:
+		detail = redact_error(error, account.access_token)[:100]
+		print(f'[WARN] {account.site}/{account.name}: cannot read the quota after check-in: {detail}')
+		return quota
+	after = parse_user_quota(response)
+	return quota if after is None else replace(quota, after=after)
+
+
 async def _wait_for_turnstile(page, account: MultisiteAccount, timeout_ms: int) -> bool:
 	print(f'[ACTION] {account.site}/{account.name}: Complete the Turnstile check in the browser window.')
 	try:
@@ -406,10 +463,13 @@ async def check_in_with_page(
 	if not _is_authenticated_user_response(user_response):
 		return MultisiteCheckinResult(MultisiteOutcome.AUTH_FAILED)
 
+	before_quota = parse_user_quota(user_response)
+	quota = None if before_quota is None else MultisiteQuota(before=before_quota)
+
 	month = datetime.now().strftime('%Y-%m')
 	status_response = await _page_request(page, account, f'{site_config.checkin_path}?month={month}', site_config)
 	if _is_checked_in(status_response):
-		return MultisiteCheckinResult(MultisiteOutcome.ALREADY_CHECKED)
+		return MultisiteCheckinResult(MultisiteOutcome.ALREADY_CHECKED, quota)
 
 	checkin_response = await _page_request(page, account, site_config.checkin_path, site_config, method='POST')
 	outcome = classify_checkin_response(checkin_response.get('status', 0), checkin_response.get('payload'))
@@ -427,14 +487,17 @@ async def check_in_with_page(
 		outcome = classify_checkin_response(checkin_response.get('status', 0), checkin_response.get('payload'))
 
 	if outcome == MultisiteOutcome.ALREADY_CHECKED:
-		return MultisiteCheckinResult(MultisiteOutcome.ALREADY_CHECKED)
+		return MultisiteCheckinResult(MultisiteOutcome.ALREADY_CHECKED, quota)
 	if outcome != MultisiteOutcome.SUCCESS:
-		return MultisiteCheckinResult(outcome)
+		return MultisiteCheckinResult(outcome, quota)
 
 	confirmation = await _page_request(page, account, f'{site_config.checkin_path}?month={month}', site_config)
-	if _is_checked_in(confirmation):
-		return MultisiteCheckinResult(MultisiteOutcome.SUCCESS)
-	return MultisiteCheckinResult(MultisiteOutcome.FAILED)
+	if not _is_checked_in(confirmation):
+		return MultisiteCheckinResult(MultisiteOutcome.FAILED, quota)
+	return MultisiteCheckinResult(
+		MultisiteOutcome.SUCCESS,
+		await _read_quota_after_checkin(page, account, site_config, quota),
+	)
 
 
 async def launch_multisite_context(settings: MultisiteBrowserSettings):
@@ -512,12 +575,14 @@ async def run_all_multisite_accounts(accounts: list[MultisiteAccount], notifier:
 		label = f'{account.site}/{account.name}'
 		print(f'[PROCESSING] Starting {label}')
 		result = await run_multisite_account(account)
-		results.append(MultisiteAccountResult(account=account, outcome=result.outcome))
+		results.append(MultisiteAccountResult(account=account, outcome=result.outcome, quota=result.quota))
+		quota_text = format_quota(result.quota)
+		detail = f'{result.outcome.value} | {quota_text}' if quota_text else result.outcome.value
 		if result.outcome in {MultisiteOutcome.SUCCESS, MultisiteOutcome.ALREADY_CHECKED}:
 			successes += 1
-			print(f'[SUCCESS] {label}: {result.outcome.value}')
+			print(f'[SUCCESS] {label}: {detail}')
 		else:
-			print(f'[FAILED] {label}: {result.outcome.value}')
+			print(f'[FAILED] {label}: {detail}')
 	print(f'[STATS] Multisite check-in result: {successes}/{len(accounts)} succeeded')
 	send_dingtalk_summary(notifier, results, executed_at=datetime.now())
 	return 0 if successes == len(accounts) else 1
