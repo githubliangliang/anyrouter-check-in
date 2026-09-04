@@ -2,29 +2,34 @@
   {
     "site": "tabitoken",
     "name": "tabitoken-1",
-    "access_token": "填写 Tabitoken 访问令牌"
+    "access_token": "填写 Tabitoken 访问令牌",
+    "use_proxy": true
   },
   {
     "site": "gorouter",
     "name": "gorouter-1",
     "access_token": "填写 GoRouter 访问令牌",
-    "api_user": "填写 GoRouter 的 New-Api-User"
+    "api_user": "填写 GoRouter 的 New-Api-User",
+    "use_proxy": true
   },
   {
     "site": "justwoker",
     "name": "justwoker-1",
-    "access_token": "填写 JustWoker 访问令牌"
+    "access_token": "填写 JustWoker 访问令牌",
+    "use_proxy": true
   },
   {
     "site": "kktoken",
     "name": "kktoken-1",
     "access_token": "填写 KKToken 访问令牌",
-    "requires_proxy": true
+    "requires_proxy": true,
+    "use_proxy": true
   },
   {
     "site": "自定义站点标识",
     "url": "https://example.com",
     "name": "custom-1",
-    "access_token": "填写访问令牌"
+    "access_token": "填写访问令牌",
+    "use_proxy": true
   }
 ]

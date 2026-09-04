@@ -33,40 +33,24 @@
     "name": "agentrouter-1",
     "provider": "agentrouter",
     "email": "填写 agentrouter-1 的邮箱",
-    "password": "填写 agentrouter-1 的密码",
-    "cookies": {
-      "session": "填写 agentrouter-1 的 session"
-    },
-    "api_user": "填写 agentrouter-1 的 new-api-user"
+    "password": "填写 agentrouter-1 的密码"
   },
   {
     "name": "agentrouter-2",
     "provider": "agentrouter",
     "email": "填写 agentrouter-2 的邮箱",
-    "password": "填写 agentrouter-2 的密码",
-    "cookies": {
-      "session": "填写 agentrouter-2 的 session"
-    },
-    "api_user": "填写 agentrouter-2 的 new-api-user"
+    "password": "填写 agentrouter-2 的密码"
   },
   {
     "name": "agentrouter-3",
     "provider": "agentrouter",
     "email": "填写 agentrouter-3 的邮箱",
-    "password": "填写 agentrouter-3 的密码",
-    "cookies": {
-      "session": "填写 agentrouter-3 的 session"
-    },
-    "api_user": "填写 agentrouter-3 的 new-api-user"
+    "password": "填写 agentrouter-3 的密码"
   },
   {
     "name": "agentrouter-4",
     "provider": "agentrouter",
     "email": "填写 agentrouter-4 的邮箱",
-    "password": "填写 agentrouter-4 的密码",
-    "cookies": {
-      "session": "填写 agentrouter-4 的 session"
-    },
-    "api_user": "填写 agentrouter-4 的 new-api-user"
+    "password": "填写 agentrouter-4 的密码"
   }
 ]

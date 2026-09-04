@@ -22,14 +22,16 @@
 
 ## 支持的站点
 
-| 站点 | 标识 | 地址 | 签到方式 | 账号文件 |
-| --- | --- | --- | --- | --- |
-| AnyRouter | `anyrouter` | `https://anyrouter.top` | 邮箱密码或 session cookies | `accounts.json` |
-| AgentRouter | `agentrouter` | `https://agentrouter.org` | 邮箱密码或 session cookies，默认走代理 | `accounts.json` |
-| Tabitoken | `tabitoken` | `https://tabitoken.com` | 访问令牌 | `multisite_accounts.json` |
-| GoRouter | `gorouter` | `https://gorouter.app` | 访问令牌 + `api_user` | `multisite_accounts.json` |
-| JustWoker | `justwoker` | `https://api.justwoker.icu` | 访问令牌 | `multisite_accounts.json` |
-| KKToken | `kktoken` | `https://kktoken.cc` | 访问令牌，只能走代理 | `multisite_accounts.json` |
+| 站点 | 标识 | 地址 | 签到方式 | 账号文件 | 代理 |
+| --- | --- | --- | --- | --- | --- |
+| AnyRouter | `anyrouter` | `https://anyrouter.top` | 邮箱密码或 session cookies | `accounts.json` | 必须，内置默认直连，要用 `PROVIDERS` 打开 |
+| AgentRouter | `agentrouter` | `https://agentrouter.org` | 只能邮箱密码登录 | `accounts.json` | 必须，内置默认已走代理 |
+| Tabitoken | `tabitoken` | `https://tabitoken.com` | 访问令牌 | `multisite_accounts.json` | 必须，账号里加 `"use_proxy": true` |
+| GoRouter | `gorouter` | `https://gorouter.app` | 访问令牌 + `api_user` | `multisite_accounts.json` | 必须，账号里加 `"use_proxy": true` |
+| JustWoker | `justwoker` | `https://api.justwoker.icu` | 访问令牌 | `multisite_accounts.json` | 必须，账号里加 `"use_proxy": true` |
+| KKToken | `kktoken` | `https://kktoken.cc` | 访问令牌 | `multisite_accounts.json` | 必须，内置已标记 `requires_proxy` |
+
+**内置的 6 个站点全部必须走代理**：直连时它们要么被 Cloudflare 拦住（页面打不开、返回 HTTP 403 `Attention Required!`），要么请求被风控，签到不会成功。运行前先配好 `CHECKIN_PROXY_URL`，再按上表把每个站点都挂到代理上，具体写法见[代理配置](#代理配置必需)。
 
 `accounts.json` 里的站点走 provider 签到，可以交给 GitHub Actions 定时运行；`multisite_accounts.json` 里的站点走访问令牌签到，需要本地有头浏览器手动完成 Turnstile。
 
@@ -63,7 +65,7 @@ cp multisite_accounts.example.json multisite_accounts.json  # 多站点访问令
 
 ### 2. 填写 accounts.json
 
-`accounts.example.json` 预置了 3 个 `anyrouter` + 4 个 `agentrouter` 账号模板，删掉用不到的条目，再把占位文字换成真实值。每个账号长这样（可借助 [在线 Secrets 配置生成器](https://millylee.github.io/anyrouter-check-in/)）：
+`accounts.example.json` 预置了 3 个 `anyrouter` + 4 个 `agentrouter` 账号模板（`agentrouter` 条目只留了 `email` + `password`，因为它只能账号登录），删掉用不到的条目，再把占位文字换成真实值。每个账号长这样（可借助 [在线 Secrets 配置生成器](https://millylee.github.io/anyrouter-check-in/)）：
 
 ```json
 [
@@ -82,10 +84,12 @@ cp multisite_accounts.example.json multisite_accounts.json  # 多站点访问令
 
 推荐只留 `email` + `password`（浏览器登录后自动获取 cookies 与用户标识），用 session cookies 登录时才需要 `cookies` 和 `api_user`。
 
+> **AgentRouter 必须用邮箱密码登录**：它的签到是在浏览器登录后查询用户信息时自动完成的，只填 `cookies` + `api_user` 的 session 方式签不到。`provider` 为 `agentrouter` 的条目请务必保留 `email` 和 `password`，`cookies` 与 `api_user` 可以删掉。
+
 **字段说明**：
 
 - `email` + `password`：推荐的浏览器登录方式，登录成功后会自动获取 cookies 与用户标识
-- `cookies`：兼容旧版的 session cookies 登录方式
+- `cookies`：兼容旧版的 session cookies 登录方式（AgentRouter 不支持，必须用邮箱密码登录）
 - `api_user`：session cookies 登录时用于请求头的 new-api-user 参数；邮箱密码登录可省略
 - `provider` (可选)：指定使用的服务商，默认为 `anyrouter`
 - `name` (可选)：自定义账号显示名称，用于通知和日志中标识账号
@@ -257,26 +261,34 @@ uv run checkin.py
   - `bypass_method: "waf_cookies"`（需要获取 `acw_tc`）
   - `sign_in_path: null`（查询用户信息时自动签到）
   - `use_proxy: true`
+  - 必须用邮箱密码登录，session cookies 无法完成签到
 
 **重要提示**：
 
 - `PROVIDERS` 是可选的，不配置则使用内置的 `anyrouter` 和 `agentrouter`
 - 自定义的 provider 配置会覆盖同名的默认配置
 
-## 代理配置（可选）
+## 代理配置（必需）
 
-内置的 `agentrouter` 默认 `use_proxy: true`。如果你的运行环境访问该平台不稳定，可以在 GitHub Actions 中配置 mihomo 订阅代理。
+目前内置的站点直连都签不到：AnyRouter、AgentRouter、Tabitoken、GoRouter、JustWoker 会被风控或返回 403，KKToken 连页面都打不开。所以先准备一个可用代理，再让每个站点都走它。
 
-在仓库 Settings -> Environments -> production -> Environment secrets 中添加：
+**第一步，准备代理**（二选一）：
 
-- `PROXY_SUBSCRIPTION_URL`：Clash/Mihomo 订阅链接。设置后，workflow 会运行 `scripts/setup_mihomo_proxy.sh`，启动本地代理并写入 `CHECKIN_PROXY_URL`。
+- 本地已有代理（Clash/Mihomo 等）：在 `.env` 里填 `CHECKIN_PROXY_URL=http://127.0.0.1:7890`。
+- 只有订阅链接：配置 `PROXY_SUBSCRIPTION_URL`（GitHub Actions 放到 Settings -> Environments -> production -> Environment secrets），workflow 会运行 `scripts/setup_mihomo_proxy.sh` 启动本地代理并写入 `CHECKIN_PROXY_URL`。
 
-本地运行时也可以直接使用已有代理：
+**第二步，让每个站点都走代理**：
 
-```bash
-CHECKIN_PROXY_URL=http://127.0.0.1:7890
-PROVIDERS={"agentrouter":{"use_proxy":true}}
-```
+- provider 签到（`accounts.json`）：内置只有 `agentrouter` 是 `use_proxy: true`，`anyrouter` 默认直连，要用 `PROVIDERS` 显式打开：
+
+  ```bash
+  CHECKIN_PROXY_URL=http://127.0.0.1:7890
+  PROVIDERS={"anyrouter":{"domain":"https://anyrouter.top","use_proxy":true},"agentrouter":{"domain":"https://agentrouter.org","use_proxy":true}}
+  ```
+
+- 多站点签到（`multisite_accounts.json`）：内置只有 `kktoken` 因 `requires_proxy` 默认走代理，其余账号都要自己加一行 `"use_proxy": true`。
+
+没走代理时的表现：provider 签到打印 `[WARN] ... Provider requires proxy but CHECKIN_PROXY_URL is not set` 并大概率签到失败；多站点签到打印 `[BLOCKED]`，结果记为 `site_unreachable`。
 
 如果使用订阅脚本，默认会用 `https://www.google.com/generate_204` 测试代理连通性；也可以通过 `PROXY_TEST_URL` 覆盖。
 
@@ -338,11 +350,12 @@ PROVIDERS={"agentrouter":{"use_proxy":true}}
 
 如果签到失败，请检查：
 
-1. 账号配置格式是否正确
-2. cookies 是否过期
-3. API User 是否正确
-4. 网站是否更改了签到接口
-5. 查看 Actions 运行日志获取详细错误信息
+1. 代理是否生效（内置站点都必须走代理，未生效时多站点签到会记成 `site_unreachable`）
+2. 账号配置格式是否正确
+3. cookies 是否过期（AgentRouter 只能用邮箱密码登录）
+4. API User 是否正确
+5. 网站是否更改了签到接口
+6. 查看 Actions 运行日志获取详细错误信息
 
 ## 本地开发环境设置
 
@@ -365,9 +378,10 @@ cp multisite_accounts.example.json multisite_accounts.json
 # .env 默认通过下面的配置加载账号文件：
 # ANYROUTER_ACCOUNTS_FILE=accounts.json
 # MULTISITE_ACCOUNTS_FILE=multisite_accounts.json
-# PROVIDERS={"agentrouter":{"domain":"https://agentrouter.org"}}
-# PROXY_SUBSCRIPTION_URL=https://example.com/sub?token=xxx
+# 站点都要走代理，所以 CHECKIN_PROXY_URL 必填，provider 也要打开 use_proxy：
 # CHECKIN_PROXY_URL=http://127.0.0.1:7890
+# PROVIDERS={"anyrouter":{"domain":"https://anyrouter.top","use_proxy":true},"agentrouter":{"domain":"https://agentrouter.org","use_proxy":true}}
+# PROXY_SUBSCRIPTION_URL=https://example.com/sub?token=xxx
 
 # 运行签到脚本
 uv run checkin.py
@@ -404,11 +418,13 @@ cp multisite_accounts.example.json multisite_accounts.json
 
 | 示例条目 | 演示的写法 |
 | --- | --- |
-| `tabitoken-1` | 内置站点最简写法：只要 `site` + `name` + `access_token` |
+| `tabitoken-1` | 内置站点最简写法：`site` + `name` + `access_token` |
 | `gorouter-1` | 站点需要 `New-Api-User` 请求头，额外填 `api_user` |
 | `justwoker-1` | 另一个内置站点，同最简写法 |
 | `kktoken-1` | 只能走代理的站点，带 `"requires_proxy": true` |
 | `自定义站点标识` | 未内置的站点：`site` 自定义标识 + `url` 指定地址 |
+
+5 个条目都带着 `"use_proxy": true`，因为这些站点直连签不到（见[代理配置](#代理配置必需)）；表格里列的才是各条目额外演示的差异。
 
 **字段说明**：
 
@@ -420,7 +436,7 @@ cp multisite_accounts.example.json multisite_accounts.json
 | `url` | 自定义站点必填 | 站点地址（等价键名 `domain`），支持带端口和子路径，末尾斜杠自动去掉；给内置站点填上即可切换到镜像域名，其余配置保持不变 |
 | `api_user` | 站点需要时必填 | `New-Api-User` 请求头的值，内置的 GoRouter 以及自己填了 `api_user_header` 的站点必须提供 |
 | `requires_proxy` | 否 | 声明站点只能走代理，默认跟随内置预设（`kktoken` 为 `true`，其余为 `false`） |
-| `use_proxy` | 否 | 单个账号强制走代理（`true`）或强制直连（`false`），不填时跟随 `requires_proxy` |
+| `use_proxy` | 否 | 单个账号强制走代理（`true`）或强制直连（`false`），不填时跟随 `requires_proxy`；目前内置的站点都要写 `true` |
 | `profile_path` | 否 | 签到前先打开的站点页面路径，默认 `/sign-in` |
 | `user_path` | 否 | 用户信息接口，默认 `/api/user/self`，用于校验令牌和读取额度 |
 | `checkin_path` | 否 | 签到接口，默认 `/api/user/checkin` |
@@ -449,7 +465,7 @@ uv run python multisite_checkin.py
 
 脚本会按账号顺序打开有头浏览器，每个站点和账号使用独立的持久化 profile。若出现 Cloudflare Turnstile，请在窗口中手动完成验证。`MULTISITE_ACCOUNTS_FILE` 可指定其它 JSON 文件；真实配置文件已加入 `.gitignore`。
 
-多站点脚本默认只让声明了 `requires_proxy` 的站点走 `CHECKIN_PROXY_URL`，其余账号保持直连（避免出口 IP 变化触发风控）；某个账号想强制走代理可加 `"use_proxy": true`，反之加 `"use_proxy": false` 强制直连。若站点在当前网络被 Cloudflare 防火墙拦截（页面打不开、返回 HTTP 403 `Attention Required!`），脚本会输出 `[BLOCKED]` 并把结果记为 `site_unreachable`，不会再去等 Turnstile。
+多站点脚本默认只让声明了 `requires_proxy` 的站点（内置只有 `kktoken`）走 `CHECKIN_PROXY_URL`，其余账号保持直连，免得出口 IP 无谓地变化触发风控——但内置这几个站点实际都需要代理，所以**每个账号都要加 `"use_proxy": true`**，确认能直连的账号才写 `"use_proxy": false`。若站点在当前网络被 Cloudflare 防火墙拦截（页面打不开、返回 HTTP 403 `Attention Required!`），脚本会输出 `[BLOCKED]` 并把结果记为 `site_unreachable`，不会再去等 Turnstile。
 
 KKToken（`kktoken.cc`）只能通过代理访问，内置预设已标记 `requires_proxy`，示例文件的 `kktoken-1` 条目也写着 `"requires_proxy": true`：没配 `CHECKIN_PROXY_URL` 时脚本直接跳过该账号并提示，不会白开一次浏览器。自定义站点照抄这一行即可声明同样的限制；反过来，若你的网络能直连 KKToken，写 `"requires_proxy": false` 就能关掉（同时也不再默认走代理）。
 
